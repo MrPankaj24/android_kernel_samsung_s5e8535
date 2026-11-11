@@ -111,7 +111,8 @@ void xhci_exynos_portsc_power_off(void __iomem * portsc, u32 on, u32 prt)
 	writel(reg, portsc);
 	reg = readl(portsc);
 
-	pr_info("power %s portsc, reg = 0x%x addr = %8x\n", on ? "on" : "off", reg, (u64) portsc);
+	pr_info("power %s portsc, reg = 0x%x addr = %p\n",
+		on ? "on" : "off", reg, portsc);
 
 #if 0
 	reg = readl(phycon_base_addr + 0x70);
@@ -192,12 +193,13 @@ static int xhci_exynos_check_port(struct usb_device *dev, bool on)
 	/* check all ports */
 	usb_hub_for_each_child(hdev, port, udev) {
 		dev_dbg(ddev, "%s, class = %d, speed = %d\n", __func__, udev->descriptor.bDeviceClass, udev->speed);
-		dev_dbg(ddev, "udev = 0x%8x, state = %d\n", udev, udev->state);
+		dev_dbg(ddev, "udev = %p, state = %d\n", udev, udev->state);
 		if (udev && udev->state == USB_STATE_CONFIGURED) {
-			if (!dev->config->interface[0])
+			if (!udev->actconfig || !udev->actconfig->interface[0] ||
+			    !udev->actconfig->interface[0]->cur_altsetting)
 				continue;
 
-			bInterfaceClass = udev->config->interface[0]
+			bInterfaceClass = udev->actconfig->interface[0]
 			    ->cur_altsetting->desc.bInterfaceClass;
 			if (on) {
 #if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
@@ -207,7 +209,7 @@ static int xhci_exynos_check_port(struct usb_device *dev, bool on)
 				    bInterfaceClass == USB_CLASS_AUDIO) {
 #endif
 					udev->do_remote_wakeup =
-					    (udev->config->desc.bmAttributes & USB_CONFIG_ATT_WAKEUP) ? 1 : 0;
+					    (udev->actconfig->desc.bmAttributes & USB_CONFIG_ATT_WAKEUP) ? 1 : 0;
 					if (udev->do_remote_wakeup == 1) {
 						device_init_wakeup(ddev, 1);
 						usb_enable_autosuspend(dev);
@@ -623,13 +625,6 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "XHCI PLAT START\n");
 
-	main_wakelock = wakeup_source_register(&pdev->dev, dev_name(&pdev->dev));
-	__pm_stay_awake(main_wakelock);
-
-	/* Initialization shared wakelock for SS HCD */
-	shared_wakelock = wakeup_source_register(&pdev->dev, dev_name(&pdev->dev));
-	__pm_stay_awake(shared_wakelock);
-
 	is_rewa_enabled = 0;
 	usb_user_scenario = 0;
 
@@ -675,6 +670,20 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 			return ret;
 	}
 
+	main_wakelock = wakeup_source_register(&pdev->dev, dev_name(&pdev->dev));
+	if (!main_wakelock)
+		return -ENOMEM;
+
+	/* Initialization shared wakelock for SS HCD */
+	shared_wakelock = wakeup_source_register(&pdev->dev, dev_name(&pdev->dev));
+	if (!shared_wakelock) {
+		wakeup_source_unregister(main_wakelock);
+		return -ENOMEM;
+	}
+
+	__pm_stay_awake(main_wakelock);
+	__pm_stay_awake(shared_wakelock);
+
 	xhci_pm_runtime_init(&pdev->dev);
 
 	pm_runtime_set_active(&pdev->dev);
@@ -709,7 +718,7 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 
 	xhci_exynos->dev = &pdev->dev;
 
-	xhci_exynos->hcd = (struct usb_hcd *)platform_get_drvdata(pdev);
+	xhci_exynos->hcd = hcd;
 	platform_set_drvdata(pdev, xhci_exynos);
 
 	spin_lock_init(&xhci_exynos->xhcioff_lock);
@@ -818,7 +827,9 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = of_property_read_u32(parent->of_node, "xhci_l2_support", &value);
+	ret = parent && parent->of_node ?
+		of_property_read_u32(parent->of_node, "xhci_l2_support", &value) :
+		-EINVAL;
 	if (ret == 0 && value == 1)
 		xhci->quirks |= XHCI_L2_SUPPORT;
 	else {
@@ -839,17 +850,25 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 		goto dealloc_usb2_hcd;
 
 	/* Set port_dev quirks for reduce port initialize time */
-	hdev = xhci->main_hcd->self.root_hub;
-	hub = usb_get_intfdata(hdev->actconfig->interface[0]);
-	port_dev = hub->ports[0];
-	port_dev->quirks |= USB_PORT_QUIRK_FAST_ENUM;
+	hdev = xhci->main_hcd ? xhci->main_hcd->self.root_hub : NULL;
+	if (hdev && hdev->actconfig && hdev->actconfig->interface[0]) {
+		hub = usb_get_intfdata(hdev->actconfig->interface[0]);
+		if (hub && hub->hdev && hub->hdev->maxchild > 0 &&
+		    hub->ports && hub->ports[0]) {
+			port_dev = hub->ports[0];
+			port_dev->quirks |= USB_PORT_QUIRK_FAST_ENUM;
+		}
+	}
 
 	/* Set port_dev quirks for reduce port initialize time */
-	hdev = xhci->shared_hcd->self.root_hub;
-	hub = usb_get_intfdata(hdev->actconfig->interface[0]);
-	if (hub) {
-		port_dev = hub->ports[0];
-		port_dev->quirks |= USB_PORT_QUIRK_FAST_ENUM;
+	hdev = xhci->shared_hcd ? xhci->shared_hcd->self.root_hub : NULL;
+	if (hdev && hdev->actconfig && hdev->actconfig->interface[0]) {
+		hub = usb_get_intfdata(hdev->actconfig->interface[0]);
+		if (hub && hub->hdev && hub->hdev->maxchild > 0 &&
+		    hub->ports && hub->ports[0]) {
+			port_dev = hub->ports[0];
+			port_dev->quirks |= USB_PORT_QUIRK_FAST_ENUM;
+		}
 	}
 
 	xhci_exynos_pm_state = BUS_RESUME;
@@ -857,12 +876,15 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 	device_enable_async_suspend(&pdev->dev);
 	pm_runtime_put_noidle(&pdev->dev);
 
-	device_set_wakeup_enable(&xhci->main_hcd->self.root_hub->dev, 1);
+	if (xhci->main_hcd && xhci->main_hcd->self.root_hub)
+		device_set_wakeup_enable(&xhci->main_hcd->self.root_hub->dev, 1);
 
 #ifdef CONFIG_EXYNOS_USBDRD_PHY30
-	device_set_wakeup_enable(&xhci->shared_hcd->self.root_hub->dev, 1);
+	if (xhci->shared_hcd && xhci->shared_hcd->self.root_hub)
+		device_set_wakeup_enable(&xhci->shared_hcd->self.root_hub->dev, 1);
 #else
-	device_set_wakeup_enable(&xhci->shared_hcd->self.root_hub->dev, 0);
+	if (xhci->shared_hcd && xhci->shared_hcd->self.root_hub)
+		device_set_wakeup_enable(&xhci->shared_hcd->self.root_hub->dev, 0);
 #endif
 
 	/*
@@ -877,10 +899,12 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 	usb_remove_hcd(hcd);
 
  disable_usb_phy:
-	usb_phy_shutdown(hcd->usb_phy);
+	if (hcd->usb_phy)
+		usb_phy_shutdown(hcd->usb_phy);
 
  put_usb3_hcd:
-	usb_put_hcd(xhci->shared_hcd);
+	if (xhci->shared_hcd)
+		usb_put_hcd(xhci->shared_hcd);
 
  disable_clk:
 	clk_disable_unprepare(xhci->clk);
@@ -890,6 +914,7 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 
  put_hcd:
 	xhci_exynos_unregister_notify();
+	g_xhci_exynos = NULL;
 	usb_put_hcd(hcd);
 
  disable_runtime:
@@ -917,7 +942,7 @@ static int xhci_exynos_remove(struct platform_device *dev)
 	struct clk *reg_clk = xhci->reg_clk;
 	struct usb_hcd *shared_hcd = xhci->shared_hcd;
 	struct usb_device *rhdev = hcd->self.root_hub;
-	struct usb_device *srhdev = shared_hcd->self.root_hub;
+	struct usb_device *srhdev = shared_hcd ? shared_hcd->self.root_hub : NULL;
 	struct usb_device *udev;
 	int port, need_wait, timeout;
 
@@ -926,11 +951,13 @@ static int xhci_exynos_remove(struct platform_device *dev)
 #if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
 	pr_info("%s\n", __func__);
 	/* In order to prevent kernel panic */
-	if (!pm_runtime_suspended(&xhci->shared_hcd->self.root_hub->dev)) {
+	if (xhci->shared_hcd && xhci->shared_hcd->self.root_hub &&
+	    !pm_runtime_suspended(&xhci->shared_hcd->self.root_hub->dev)) {
 		pr_info("%s, shared_hcd pm_runtime_forbid\n", __func__);
 		pm_runtime_forbid(&xhci->shared_hcd->self.root_hub->dev);
 	}
-	if (!pm_runtime_suspended(&xhci->main_hcd->self.root_hub->dev)) {
+	if (xhci->main_hcd && xhci->main_hcd->self.root_hub &&
+	    !pm_runtime_suspended(&xhci->main_hcd->self.root_hub->dev)) {
 		pr_info("%s, main_hcd pm_runtime_forbid\n", __func__);
 		pm_runtime_forbid(&xhci->main_hcd->self.root_hub->dev);
 	}
@@ -983,9 +1010,11 @@ remove_hcd:
 #ifdef CONFIG_USB_DEBUG_DETAILED_LOG
 	dev_info(&dev->dev, "remove hcd (shared)\n");
 #endif
-	usb_remove_hcd(shared_hcd);
+	if (shared_hcd)
+		usb_remove_hcd(shared_hcd);
 	xhci->shared_hcd = NULL;
-	usb_phy_shutdown(hcd->usb_phy);
+	if (hcd->usb_phy)
+		usb_phy_shutdown(hcd->usb_phy);
 #ifdef CONFIG_USB_DEBUG_DETAILED_LOG
 	dev_info(&dev->dev, "remove hcd (main)\n");
 #endif
@@ -995,7 +1024,8 @@ remove_hcd:
 	wakeup_source_unregister(shared_hcd_wakelock);
 
 	devm_iounmap(&dev->dev, hcd->regs);
-	usb_put_hcd(shared_hcd);
+	if (shared_hcd)
+		usb_put_hcd(shared_hcd);
 
 	clk_disable_unprepare(clk);
 	clk_disable_unprepare(reg_clk);

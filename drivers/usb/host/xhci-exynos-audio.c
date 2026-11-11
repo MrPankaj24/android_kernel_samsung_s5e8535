@@ -67,6 +67,9 @@ void xhci_exynos_enable_event_ring(struct xhci_hcd *xhci)
 	u32 temp;
 	u64 temp_64;
 
+	if (!g_xhci_exynos_audio || !g_xhci_exynos_audio->ir_set_audio)
+		return;
+
 	temp_64 = xhci_read_64(xhci, &g_xhci_exynos_audio->ir_set_audio->erst_dequeue);
 	temp_64 &= ~ERST_PTR_MASK;
 	xhci_info(xhci, "ERST2 deq = 64'h%0lx", (unsigned long)temp_64);
@@ -91,7 +94,16 @@ void xhci_exynos_enable_event_ring(struct xhci_hcd *xhci)
 void xhci_exynos_usb_offload_store_hw_info(struct xhci_hcd *xhci, struct usb_hcd *hcd, struct usb_device *udev)
 {
 	struct xhci_virt_device *virt_dev;
-	struct xhci_erst_entry *entry = &g_xhci_exynos_audio->erst_audio.entries[0];
+	struct xhci_erst_entry *entry;
+
+	if (!g_xhci_exynos_audio || !g_hwinfo || !udev ||
+	    !xhci->dcbaa || !xhci->devs[udev->slot_id])
+		return;
+
+	if (!g_xhci_exynos_audio->erst_audio.entries)
+		return;
+
+	entry = &g_xhci_exynos_audio->erst_audio.entries[0];
 
 	virt_dev = xhci->devs[udev->slot_id];
 
@@ -147,10 +159,14 @@ void xhci_exynos_parse_endpoint(struct xhci_hcd *xhci, struct usb_device *udev,
 	int size = 0x100;
 	unsigned ep_index;
 
+	if (!g_hwinfo || !d)
+		return;
+
 	g_hwinfo->rawdesc_length = size;
 	ep_index = xhci_get_endpoint_index(d);
 
-	pr_info("udev = 0x%8x, Ep = 0x%x, desc = 0x%8x\n", udev, d->bEndpointAddress, d);
+	pr_info("udev = %p, Ep = 0x%x, desc = %p\n",
+		udev, d->bEndpointAddress, d);
 
 	if ((d->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC) {
 		if ((d->bmAttributes & USB_ENDPOINT_USAGE_MASK) == USB_ENDPOINT_USAGE_FEEDBACK) {
@@ -205,6 +221,9 @@ int xhci_exynos_alloc_event_ring(struct xhci_hcd *xhci, gfp_t flags)
 	u64 val_64;
 	struct xhci_segment *seg;
 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
+
+	if (!g_xhci_exynos_audio)
+		return -ENOMEM;
 
 	g_xhci_exynos_audio->ir_set_audio = &xhci->run_regs->ir_set[1];
 	g_xhci_exynos_audio->save_addr = dma_alloc_coherent(dev, sizeof(PAGE_SIZE), &dma, flags);
@@ -544,7 +563,8 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 
 		if (!g_hwinfo->feedback)
 			dma = EXYNOS_URAM_ISOC_OUT_RING_ADDR;
-		xhci_info(xhci, "First ISOC-OUT Ring is allocated at 0x%x", dma);
+		xhci_info(xhci, "First ISOC-OUT Ring is allocated at 0x%llx",
+			  (unsigned long long)dma);
 	} else if (endpoint_type == ISOC_IN_EP) {
 		if (!g_hwinfo->feedback)
 			seg->trbs = ioremap(EXYNOS_URAM_ISOC_IN_RING_ADDR, TRB_SEGMENT_SIZE);
@@ -555,7 +575,8 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 
 		if (!g_hwinfo->feedback)
 			dma = EXYNOS_URAM_ISOC_IN_RING_ADDR;
-		xhci_info(xhci, "First ISOC-IN Ring is allocated at 0x%x", dma);
+		xhci_info(xhci, "First ISOC-IN Ring is allocated at 0x%llx",
+			  (unsigned long long)dma);
 	} else {
 		xhci_err(xhci, "%s : Unexpected EP Type!\n", __func__);
 		return NULL;
@@ -745,6 +766,10 @@ int xhci_exynos_audio_init(struct device *parent, struct platform_device *pdev)
 	int			ret;
 	int			value;
 
+	if (!parent || !parent->of_node || !pdev ||
+	    !g_xhci_exynos_audio || !g_hwinfo)
+		return -EINVAL;
+
 	ret = of_property_read_u32(parent->of_node,
 				"xhci_use_uram_for_audio", &value);
 	if (ret == 0 && value == 1) {
@@ -796,15 +821,24 @@ int xhci_exynos_audio_alloc(struct device *parent)
 {
 	dma_addr_t	dma;
 
+	if (!parent)
+		return -EINVAL;
+
 	dev_info(parent, "%s\n", __func__);
 
 	g_xhci_exynos_audio = devm_kzalloc(parent, sizeof(struct xhci_exynos_audio), GFP_KERNEL);
-
 	g_hwinfo = devm_kzalloc(parent, sizeof(struct hcd_hw_info), GFP_KERNEL);
+	if (!g_xhci_exynos_audio || !g_hwinfo) {
+		g_xhci_exynos_audio = NULL;
+		g_hwinfo = NULL;
+		return -ENOMEM;
+	}
 
 	/* In data buf alloc */
 	g_xhci_exynos_audio->in_addr = dma_alloc_coherent(parent,
 			(PAGE_SIZE * 256), &dma, GFP_KERNEL);
+	if (!g_xhci_exynos_audio->in_addr)
+		return -ENOMEM;
 	g_xhci_exynos_audio->in_dma = dma;
 	dev_info(parent, "// IN Data address = 0x%llx (DMA), %p (virt)",
 		(unsigned long long)g_xhci_exynos_audio->in_dma, g_xhci_exynos_audio->in_addr);
@@ -812,6 +846,13 @@ int xhci_exynos_audio_alloc(struct device *parent)
 	/* Out data buf alloc */
 	g_xhci_exynos_audio->out_addr = dma_alloc_coherent(parent,
 			(PAGE_SIZE * 256), &dma, GFP_KERNEL);
+	if (!g_xhci_exynos_audio->out_addr) {
+		dma_free_coherent(parent, PAGE_SIZE * 256,
+				  g_xhci_exynos_audio->in_addr,
+				  g_xhci_exynos_audio->in_dma);
+		g_xhci_exynos_audio->in_addr = NULL;
+		return -ENOMEM;
+	}
 	g_xhci_exynos_audio->out_dma = dma;
 	dev_info(parent, "// OUT Data address = 0x%llx (DMA), %p (virt)",
 		(unsigned long long)g_xhci_exynos_audio->out_dma, g_xhci_exynos_audio->out_addr);
