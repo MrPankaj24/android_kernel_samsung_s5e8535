@@ -30,6 +30,9 @@
 #include "../dwc3/dwc3-exynos.h"
 #include "../dwc3/exynos-otg.h"
 #include "xhci-exynos.h"
+#ifdef CONFIG_SND_EXYNOS_USB_AUDIO_GIC
+#include "xhci-exynos-audio.h"
+#endif
 #include <soc/samsung/exynos-cpupm.h>
 
 static struct hc_driver __read_mostly xhci_exynos_hc_driver;
@@ -835,6 +838,13 @@ static int xhci_exynos_probe(struct platform_device *pdev)
 	else {
 		dev_err(&pdev->dev, "can't get xhci l2 support, error = %d\n", ret);
 	}
+
+#ifdef CONFIG_SND_EXYNOS_USB_AUDIO_GIC
+	if (parent && parent->of_node) {
+		if (xhci_exynos_audio_alloc(parent) == 0)
+			xhci_exynos_audio_init(parent, pdev);
+	}
+#endif
 
 	hcd->tpl_support = of_usb_host_tpl_support(sysdev->of_node);
 	xhci->shared_hcd->tpl_support = hcd->tpl_support;

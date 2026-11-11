@@ -311,7 +311,9 @@ void xhci_exynos_free_container_ctx(struct xhci_hcd *xhci, struct xhci_container
 void xhci_exynos_alloc_container_ctx(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx, int type, gfp_t flags)
 {
 	if (type != XHCI_CTX_TYPE_INPUT
-	    && g_xhci_exynos_audio->exynos_uram_ctx_alloc == 0 && xhci->quirks & XHCI_USE_URAM_FOR_EXYNOS_AUDIO) {
+	    && g_xhci_exynos_audio
+	    && g_xhci_exynos_audio->exynos_uram_ctx_alloc == 0
+	    && xhci->quirks & XHCI_USE_URAM_FOR_EXYNOS_AUDIO) {
 		/* Only first Device Context uses URAM */
 		int i;
 		ctx->bytes = ioremap(EXYNOS_URAM_DEVICE_CTX_ADDR, 2112);
@@ -337,7 +339,8 @@ struct xhci_ring *xhci_exynos_alloc_transfer_ring(struct xhci_hcd *xhci,
 						  enum xhci_ring_type ring_type,
 						  unsigned int max_packet, gfp_t mem_flags)
 {
-	if (xhci->quirks & XHCI_USE_URAM_FOR_EXYNOS_AUDIO) {
+	if (xhci->quirks & XHCI_USE_URAM_FOR_EXYNOS_AUDIO &&
+	    g_xhci_exynos_audio) {
 		/* If URAM is not allocated, it try to allocate from URAM */
 		if (g_xhci_exynos_audio->exynos_uram_isoc_out_alloc == 0 && endpoint_type == ISOC_OUT_EP) {
 			xhci_info(xhci, "First ISOC OUT ring is allocated from URAM.\n");
@@ -462,7 +465,8 @@ struct xhci_device_context_array *xhci_exynos_alloc_dcbaa(struct xhci_hcd *xhci,
 
 		xhci->dcbaa->dma = EXYNOS_URAM_DCBAA_ADDR;
 
-		g_hwinfo->need_first_probe = true;
+		if (g_hwinfo)
+			g_hwinfo->need_first_probe = true;
 	} else
 		xhci_info(xhci, "URAM qurik is not set! Please check it\n");
 
@@ -473,15 +477,18 @@ void xhci_exynos_free_dcbaa(struct xhci_hcd *xhci)
 {
 	if (xhci->quirks & XHCI_USE_URAM_FOR_EXYNOS_AUDIO) {
 		iounmap(xhci->dcbaa);
-		if (g_xhci_exynos_audio->usb_audio_ctx_addr != NULL) {
+		if (g_xhci_exynos_audio &&
+		    g_xhci_exynos_audio->usb_audio_ctx_addr != NULL) {
 			iounmap(g_xhci_exynos_audio->usb_audio_ctx_addr);
 			g_xhci_exynos_audio->usb_audio_ctx_addr = NULL;
 		}
-		if (g_xhci_exynos_audio->usb_audio_isoc_out_addr != NULL) {
+		if (g_xhci_exynos_audio &&
+		    g_xhci_exynos_audio->usb_audio_isoc_out_addr != NULL) {
 			iounmap(g_xhci_exynos_audio->usb_audio_isoc_out_addr);
 			g_xhci_exynos_audio->usb_audio_isoc_out_addr = NULL;
 		}
-		if (g_xhci_exynos_audio->usb_audio_isoc_in_addr != NULL) {
+		if (g_xhci_exynos_audio &&
+		    g_xhci_exynos_audio->usb_audio_isoc_in_addr != NULL) {
 			iounmap(g_xhci_exynos_audio->usb_audio_isoc_in_addr);
 			g_xhci_exynos_audio->usb_audio_isoc_in_addr = NULL;
 		}
@@ -502,6 +509,9 @@ static struct xhci_segment *xhci_segment_alloc_uram(struct xhci_hcd *xhci,
 	dma_addr_t dma;
 	int i;
 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
+
+	if (!g_hwinfo)
+		return NULL;
 
 	seg = kzalloc_node(sizeof(*seg), flags, dev_to_node(dev));
 	if (!seg)
@@ -550,6 +560,7 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 	if (seg_num != 0) {
 		/* Support just one segment */
 		xhci_err(xhci, "%s : Unexpected SEG NUMBER!\n", __func__);
+		kfree(seg);
 		return NULL;
 	}
 
@@ -558,8 +569,10 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 			seg->trbs = ioremap(EXYNOS_URAM_ISOC_OUT_RING_ADDR, TRB_SEGMENT_SIZE);
 		else
 			seg->trbs = dma_pool_zalloc(xhci->segment_pool, flags, &dma);
-		if (!seg->trbs)
+		if (!seg->trbs) {
+			kfree(seg);
 			return NULL;
+		}
 
 		if (!g_hwinfo->feedback)
 			dma = EXYNOS_URAM_ISOC_OUT_RING_ADDR;
@@ -570,8 +583,10 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 			seg->trbs = ioremap(EXYNOS_URAM_ISOC_IN_RING_ADDR, TRB_SEGMENT_SIZE);
 		else
 			seg->trbs = dma_pool_zalloc(xhci->segment_pool, flags, &dma);
-		if (!seg->trbs)
+		if (!seg->trbs) {
+			kfree(seg);
 			return NULL;
+		}
 
 		if (!g_hwinfo->feedback)
 			dma = EXYNOS_URAM_ISOC_IN_RING_ADDR;
@@ -579,6 +594,7 @@ static struct xhci_segment *xhci_segment_alloc_uram_ep(struct xhci_hcd *xhci,
 			  (unsigned long long)dma);
 	} else {
 		xhci_err(xhci, "%s : Unexpected EP Type!\n", __func__);
+		kfree(seg);
 		return NULL;
 	}
 
@@ -724,6 +740,10 @@ int xhci_exynos_sync_dev_ctx(struct xhci_hcd *xhci, unsigned int slot_id)
 	int last_ep;
 	int last_ep_ctx = 31;
 
+	if (!g_hwinfo || !xhci || slot_id >= MAX_HC_SLOTS ||
+	    !xhci->devs[slot_id])
+		return -EINVAL;
+
 	/* Use default hwinfo in case
 	 * there are no audio devices occupied
 	 */
@@ -823,6 +843,8 @@ int xhci_exynos_audio_alloc(struct device *parent)
 
 	if (!parent)
 		return -EINVAL;
+	if (g_xhci_exynos_audio && g_hwinfo)
+		return 0;
 
 	dev_info(parent, "%s\n", __func__);
 

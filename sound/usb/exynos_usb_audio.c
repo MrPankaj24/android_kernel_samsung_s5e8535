@@ -1181,12 +1181,14 @@ static void exynos_usb_audio_disconn(struct usb_interface *intf)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 
+#ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
+	struct snd_usb_audio *chip = usb_get_intfdata(intf);
+#endif
+
 	if (!usb_audio || !g_hwinfo)
 		return;
 
 #ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
-	struct snd_usb_audio *chip = usb_get_intfdata(intf);
-
 	send_usb_audio_uevent(udev, chip->card->number, 0);
 	set_usb_audio_cardnum(chip->card->number, 0, 0);
 #endif
