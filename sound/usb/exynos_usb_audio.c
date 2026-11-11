@@ -953,9 +953,14 @@ static int exynos_usb_add_ctls(struct snd_usb_audio *chip,
 
 int exynos_usb_audio_init(struct device *dev, struct platform_device *pdev)
 {
-	struct device_node *np = dev->of_node;
+	struct device_node *np;
 	struct device_node *np_abox;
 	struct platform_device *pdev_abox;
+
+	if (!dev || !pdev || !g_hwinfo)
+		return -ENODEV;
+
+	np = dev->of_node;
 
 	if (DEBUG)
 		dev_info(dev, "USB_AUDIO_IPC : %s\n", __func__);
@@ -1126,6 +1131,9 @@ static int exynos_usb_audio_connect(struct usb_interface *intf)
 	struct usb_device *udev = interface_to_usbdev(intf);
 	int timeout = 0;
 
+	if (!usb_audio || !g_hwinfo)
+		return -ENODEV;
+
 	alts = &intf->altsetting[0];
 	altsd = get_iface_desc(alts);
 
@@ -1172,6 +1180,10 @@ static int exynos_usb_audio_connect(struct usb_interface *intf)
 static void exynos_usb_audio_disconn(struct usb_interface *intf)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
+
+	if (!usb_audio || !g_hwinfo)
+		return;
+
 #ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
 	struct snd_usb_audio *chip = usb_get_intfdata(intf);
 
